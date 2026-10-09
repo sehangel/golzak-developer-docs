@@ -31,7 +31,7 @@ You pay from the **credit balance** of your Golzak account.
   with a **new** `Idempotency-Key`.
 - **Daily spending cap:** a key can also have a cap per UTC day: `403 daily_spend_cap_reached` (see
   [Authentication](authentication.md#daily-spending-cap)).
-- **Refunds:** a registration refused by ANRT, or an operation that failed, has its charge returned; the operation's
+- **Refunds:** a registration refused by ANRT, or an operation that failed, has its charge (if any) returned; the operation's
   `refund.status` says `credited` (back on your credit) or `manual_review` (Golzak returns it by hand).
 
 ```bash

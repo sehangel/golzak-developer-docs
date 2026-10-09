@@ -2037,7 +2037,7 @@ components:
             `active` (done; the domain is active),
             `refused` (registration refused by ANRT; register only),
             `failed` (could not be done). After `refused` or `failed` the
-            charge is returned (`refund`). This set is closed for v1.
+            charge, if any, is returned (`refund`). This set is closed for v1.
           enum: [pending, active, refused, failed]
           maxLength: 255
         pending_reason:
@@ -2064,6 +2064,10 @@ components:
             - $ref: '#/components/schemas/Money'
             - type: 'null'
         refund:
+          description: |
+            After `refused` or `failed`, how the charge is returned. `null`
+            while `pending`, after `active`, and when nothing was taken
+            (`charge` is `null` or zero): there is nothing to return.
           oneOf:
             - $ref: '#/components/schemas/Refund'
             - type: 'null'

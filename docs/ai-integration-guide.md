@@ -81,7 +81,7 @@ Every paid `POST` accepts `?dry_run=true`: all checks, no order, `200` with the 
 8. webhook operation.pending         → documents_required: tell staff, deadline
 9. webhook operation.active          → done; GET /domains/N for expiry
    webhook operation.refused         → tell the client; refund in operation.refund
-   webhook operation.failed          → show operation.error.detail; refund in operation.refund
+   webhook operation.failed          → show operation.error.detail; refund in operation.refund (null if nothing was taken)
 ```
 
 A dry run consumes its own idempotency key; use a different key for the real order.
@@ -372,7 +372,7 @@ Valid body, credit below the price → `402`:
 | `pending` | any other value | A reason added later in v1. | Treat as "still pending". |
 | `active` | `null` | Done. | Mark done; refresh the domain with `GET /domains/{name}`. |
 | `refused` | `null` | ANRT refused the registration. | Tell the client; show `refund.status`. |
-| `failed` | `null` | Could not be done. | Show `error.detail`; show `refund.status`; offer to retry with a new key. |
+| `failed` | `null` | Could not be done. | Show `error.detail`; show `refund.status` when `refund` is not `null` (it is `null` when nothing was taken); offer to retry with a new key. |
 
 Final states (`active`, `refused`, `failed`) never change. Ignore any later event that would move an operation out of a
 final state.
@@ -439,5 +439,6 @@ app.post("/golzak/webhook", express.raw({ type: "application/json" }), async (re
 - [ ] Webhook signatures are verified on the raw body; bad signatures get `400`; events are deduplicated.
 - [ ] `documents_required: true` alerts a human, with `documents_deadline` when it is not `null`.
 - [ ] A reconciler polls operations still `pending`.
-- [ ] `refused` and `failed` show the refund status to the reseller.
+- [ ] `refused` and `failed` show the refund status to the reseller; a `failed` operation that took nothing has
+  `refund: null`.
 - [ ] Expiring domains are renewed or flagged before `expires_at`; nothing assumes auto-renew is on.

@@ -25,7 +25,7 @@ So `POST /domains` does not wait. It answers `202` with an **operation**; the re
 | `documents_required` | `true` while ANRT waits for the examination form and the holder's documents. |
 | `documents_deadline` | Last day to send them to Golzak, when known; `null` otherwise. The date in Golzak's e-mail is always the reference. |
 | `charge` | What was taken from your credit. |
-| `refund` | After `refused` or `failed`: `credited` (back on your credit) or `manual_review` (Golzak returns it by hand). |
+| `refund` | After `refused` or `failed`: `credited` (back on your credit) or `manual_review` (Golzak returns it by hand). `null` when nothing was taken (`charge` `null` or zero). |
 | `error` | Why it was refused or failed, in the [error format](errors.md). |
 
 Renewals and transfers return operations too. They end `active` or `failed`; only registrations can be `refused`.
