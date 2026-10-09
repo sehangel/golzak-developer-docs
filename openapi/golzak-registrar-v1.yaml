@@ -1,0 +1,2219 @@
+openapi: 3.1.0
+info:
+  title: Golzak Registrar API
+  version: 1.0.0
+  summary: Register and manage domains through Golzak, from your own systems or AI agents.
+  description: |
+    Reseller API to register and manage domains through Golzak. A partner
+    company (the reseller) registers, renews, transfers and manages names for
+    its own clients, paid from the prepaid credit of its Golzak account.
+    **Version 1 covers .ma domains only:** `.ma`, `.co.ma`, `.net.ma` and
+    `.org.ma`. Later versions may add extensions; `GET /prices` lists the
+    extensions you can order.
+
+    - **Prices** are the reseller's own: they come from the reseller's client
+      group at Golzak and are read live on every call. `GET /check` and
+      `GET /prices` return them. No price is written in this document.
+    - **Payment** is prepaid credit. Each registration, renewal or transfer is
+      paid from the credit balance (`GET /balance`). Not enough credit means
+      error `insufficient_credit` and nothing is ordered.
+    - **Registration is asynchronous.** `POST /domains` returns an operation.
+      Its status moves `pending` → `active`, or `refused` when the registry
+      (ANRT) refuses the name. Results arrive by signed webhook and by
+      `GET /operations/{id}`.
+    - **Holder rules** (who owns the domain, which legal ID) are enforced by
+      the API, never left to the reseller. See the `Holder` schema.
+
+    Human guides, the AI integration guide and `llms.txt` are published next
+    to this reference.
+  contact:
+    name: Golzak domains team
+    url: https://developers.golzak.com
+    email: domains@golzak.com
+  license:
+    name: Proprietary. Use is governed by the Golzak reseller contract.
+    url: https://golzak.com
+servers:
+  - url: https://api.golzak.com/domains/v1
+    description: |
+      Production. Golzak's APIs share one host, `api.golzak.com`; each product
+      has its own prefix and major version (`/domains/v1` here).
+    x-internal: false
+security:
+  - apiKey: []
+tags:
+  - name: Account
+    description: Prepaid credit and the daily spending cap of your API key.
+  - name: Availability and prices
+    description: Is a name free, and what does it cost you. Prices are read live from your client group.
+  - name: Domains
+    description: Register, list, read, renew, change nameservers, lock, auto-renew, get the transfer code.
+  - name: Operations
+    description: Follow asynchronous work (registration, renewal, transfer).
+  - name: Transfers
+    description: Move a .ma name from another registrar to Golzak.
+
+paths:
+  /check:
+    get:
+      operationId: checkDomain
+      tags: [Availability and prices]
+      summary: Check availability and your 1-year price
+      description: |
+        Answers whether `name` can be registered and returns your price for
+        one year. The availability answer comes from a WHOIS lookup and is a
+        strong hint, not a reservation: the registry gives the final answer
+        when the registration is submitted.
+
+        Only `.ma`, `.co.ma`, `.net.ma` and `.org.ma` are accepted.
+        `.ac.ma`, `.gov.ma` and `.press.ma` answer `tld_manual_only`.
+      parameters:
+        - name: name
+          in: query
+          required: true
+          description: Full domain name, lower case, e.g. `example.ma` or `example.co.ma`.
+          schema:
+            $ref: '#/components/schemas/DomainNameInput'
+          example: atlas-tours.ma
+      responses:
+        '200':
+          description: Availability and price.
+          headers:
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckResult'
+              examples:
+                available:
+                  summary: Available
+                  value:
+                    name: atlas-tours.ma
+                    extension: .ma
+                    available: true
+                    price:
+                      operation: register
+                      years: 1
+                      amount: '<your price, read live>'
+                      currency: '<your account currency>'
+                taken:
+                  summary: Already registered
+                  value:
+                    name: google.ma
+                    extension: .ma
+                    available: false
+                    price:
+                      operation: register
+                      years: 1
+                      amount: '<your price, read live>'
+                      currency: '<your account currency>'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/UnprocessableTld'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /prices:
+    get:
+      operationId: listPrices
+      tags: [Availability and prices]
+      summary: List your prices for every accepted extension
+      description: |
+        Your register, renew and transfer prices for `.ma`, `.co.ma`,
+        `.net.ma` and `.org.ma`, per number of years. The figures come from
+        your client group at Golzak and are read live on every call: never
+        cache them for longer than a quote you show to a client.
+        The year counts listed are the only ones you can order.
+      responses:
+        '200':
+          description: Your price list.
+          headers:
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceList'
+              example:
+                currency: '<your account currency>'
+                source: client_group
+                read_at: '2026-10-08T09:00:00Z'
+                extensions:
+                  - extension: .ma
+                    grace_period_days: 27
+                    redemption_period_days: 2
+                    register:
+                      '1': '<your price, read live>'
+                      '2': '<your price, read live>'
+                    renew:
+                      '1': '<your price, read live>'
+                    transfer:
+                      '1': '<your price, read live>'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /domains:
+    get:
+      operationId: listDomains
+      tags: [Domains]
+      summary: List your domains
+      description: Every domain of your account, newest first, paginated with an opaque cursor.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Page size.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+            format: int32
+        - name: cursor
+          in: query
+          required: false
+          description: |
+            The `next_cursor` of the previous page. A cursor belongs to its walk: one that is no longer
+            accepted answers `400 invalid_request`; start again from the first page.
+          schema:
+            type: string
+            maxLength: 512
+            pattern: ^[^\u0000-\u001F\u007F]*$
+      responses:
+        '200':
+          description: One page of domains.
+          headers:
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainPage'
+              example:
+                data:
+                  - name: atlas-tours.ma
+                    status: active
+                    registered_at: '2026-10-08'
+                    expires_at: '2027-10-08'
+                    auto_renew: false
+                    pending_operation_id: null
+                next_cursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    post:
+      operationId: registerDomain
+      tags: [Domains]
+      summary: Register a domain (asynchronous)
+      description: |
+        Orders the registration of `name` for `years`, for the holder given,
+        paid from your credit. Every check runs **before** anything is
+        ordered: name and extension, holder rules, availability, your price,
+        your credit balance and your daily spending cap. If one fails you get
+        the error and nothing is ordered or charged.
+
+        On success the answer is `202` with an operation in status `pending`.
+        Follow it with webhooks or `GET /operations/{id}`. It ends in:
+
+        - `active`: the domain is registered;
+        - `refused`: the registry (ANRT) refused the name; the charge is
+          returned to your credit (see `refund`);
+        - `failed`: a technical failure; the charge is returned to your credit.
+
+        While ANRT examines a name (`pending_reason: registry_review`),
+        `documents_required` is `true` (and `documents_deadline` when known): send
+        the documents asked for in Golzak's e-mail before that date, or the
+        request lapses.
+
+        Send `?dry_run=true` to run every check without ordering: the answer
+        is `200` with the charge that would be made.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/DryRun'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            examples:
+              moroccanIndividual:
+                summary: Moroccan individual (legal_id = CIN)
+                value:
+                  name: atlas-tours.ma
+                  years: 1
+                  holder:
+                    type: individual
+                    moroccan: true
+                    legal_id: '<CIN number>'
+                    first_name: Salma
+                    last_name: Bennani
+                    email: salma.bennani@example.com
+                    phone: '+212.612345678'
+                    address:
+                      line1: 12 Rue Example
+                      city: Casablanca
+                      postal_code: '20000'
+                      country: MA
+                  nameservers: [ns1.example-dns.com, ns2.example-dns.com]
+              foreignIndividual:
+                summary: Non-Moroccan individual (legal_id = passport number)
+                value:
+                  name: kemal-yilmaz.ma
+                  years: 1
+                  holder:
+                    type: individual
+                    moroccan: false
+                    legal_id: '<passport number>'
+                    first_name: Kemal
+                    last_name: Yilmaz
+                    email: kemal@example.com
+                    phone: '+90.5321234567'
+                    address:
+                      line1: Example Cd. 5
+                      city: Istanbul
+                      postal_code: '34000'
+                      country: TR
+                  nameservers: [ns1.example-dns.com, ns2.example-dns.com]
+              moroccanCompany:
+                summary: Moroccan company (legal_id = ICE or RC)
+                value:
+                  name: atlas-export.co.ma
+                  years: 2
+                  holder:
+                    type: company
+                    moroccan: true
+                    legal_id: '<ICE or RC number>'
+                    organization: Atlas Export SARL
+                    first_name: Youssef
+                    last_name: Alaoui
+                    email: contact@atlas-export.example
+                    phone: '+212.522123456'
+                    address:
+                      line1: 4 Boulevard Example
+                      city: Rabat
+                      postal_code: '10000'
+                      country: MA
+                  nameservers: [ns1.example-dns.com, ns2.example-dns.com]
+              foreignCompany:
+                summary: Foreign company (legal_id = registration number or tax ID)
+                value:
+                  name: anatolia-trade.ma
+                  years: 1
+                  holder:
+                    type: company
+                    moroccan: false
+                    legal_id: '<company registration number or tax ID>'
+                    organization: Anatolia Trade A.S.
+                    first_name: Elif
+                    last_name: Demir
+                    email: it@anatolia-trade.example
+                    phone: '+90.2121234567'
+                    address:
+                      line1: Example Sk. 10
+                      city: Istanbul
+                      country: TR
+                  nameservers: [ns1.example-dns.com, ns2.example-dns.com]
+      responses:
+        '200':
+          description: Dry run only (`dry_run=true`). Every check passed; nothing was ordered.
+          headers:
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DryRunResult'
+              example:
+                dry_run: true
+                would_charge:
+                  amount: '<your price, read live>'
+                  currency: '<your account currency>'
+                credit_after:
+                  amount: '<your balance minus the charge>'
+                  currency: '<your account currency>'
+        '202':
+          description: Accepted. The registration runs asynchronously; follow the operation.
+          headers:
+            Location:
+              description: URL of the operation.
+              schema:
+                type: string
+                maxLength: 255
+                pattern: ^[^\u0000-\u001F\u007F]*$
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+              example:
+                id: op_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+                type: register
+                initiator: api
+                status: pending
+                pending_reason: processing
+                domain: atlas-tours.ma
+                years: 1
+                charge:
+                  amount: '<your price, read live>'
+                  currency: '<your account currency>'
+                refund: null
+                documents_required: false
+                documents_deadline: null
+                error: null
+                created_at: '2026-10-08T09:00:00Z'
+                updated_at: '2026-10-08T09:00:00Z'
+                completed_at: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/InsufficientCredit'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '428':
+          $ref: '#/components/responses/IdempotencyKeyRequired'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/OrdersDisabled'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /domains/{name}:
+    get:
+      operationId: getDomain
+      tags: [Domains]
+      summary: Read one domain (status and expiry)
+      description: |
+        Status, dates, nameservers, auto-renew and transfer-lock state of one of
+        your domains. A name that is not in your account answers
+        `domain_not_found`, whether or not it exists elsewhere.
+      parameters:
+        - $ref: '#/components/parameters/DomainNamePath'
+      responses:
+        '200':
+          description: The domain.
+          headers:
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainDetail'
+              example:
+                name: atlas-tours.ma
+                status: active
+                registered_at: '2026-10-08'
+                expires_at: '2027-10-08'
+                auto_renew: false
+                transfer_locked: true
+                pending_operation_id: null
+                nameservers: [ns1.example-dns.com, ns2.example-dns.com]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /domains/{name}/renew:
+    post:
+      operationId: renewDomain
+      tags: [Domains]
+      summary: Renew a domain (asynchronous)
+      description: |
+        Renews `name` for `years`, paid from your credit at your renew price.
+        Credit and daily cap are checked before anything is ordered. Returns
+        an operation that ends `active` (renewed, new `expires_at` on the
+        domain) or `failed` (charge returned to your credit).
+      parameters:
+        - $ref: '#/components/parameters/DomainNamePath'
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/DryRun'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenewRequest'
+            example:
+              years: 1
+      responses:
+        '200':
+          description: Dry run only. Every check passed; nothing was ordered.
+          headers:
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DryRunResult'
+        '202':
+          description: Accepted. Follow the operation.
+          headers:
+            Location:
+              description: URL of the operation.
+              schema:
+                type: string
+                maxLength: 255
+                pattern: ^[^\u0000-\u001F\u007F]*$
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/InsufficientCredit'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '428':
+          $ref: '#/components/responses/IdempotencyKeyRequired'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/OrdersDisabled'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /domains/{name}/nameservers:
+    put:
+      operationId: setNameservers
+      tags: [Domains]
+      summary: Replace the nameservers
+      description: |
+        Replaces the full nameserver list. Synchronous: the answer comes after
+        the registry accepted the change. A name still under ANRT examination
+        cannot be changed (`domain_status_prohibits`). `Idempotency-Key` is
+        accepted and recommended here.
+      parameters:
+        - $ref: '#/components/parameters/DomainNamePath'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NameserversRequest'
+            example:
+              nameservers: [ns1.example-dns.com, ns2.example-dns.com]
+      responses:
+        '200':
+          description: Nameservers replaced.
+          headers:
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /domains/{name}/epp-code:
+    get:
+      operationId: getEppCode
+      tags: [Domains]
+      summary: Get a new transfer (EPP) code
+      description: |
+        Returns the transfer code (EPP auth code) the holder needs to move the
+        name to another registrar. **Each call sets a new code at the
+        registry; the previous code stops working.** Give the code only to
+        the domain holder.
+
+        The code alone is not enough: Golzak locks every name against
+        transfer. Remove the lock first with
+        `PUT /domains/{name}/transfer-lock` (`{"locked": false}`), or the
+        new registrar's transfer request is refused.
+      parameters:
+        - $ref: '#/components/parameters/DomainNamePath'
+      responses:
+        '200':
+          description: The new code.
+          headers:
+            Cache-Control:
+              description: Always `no-store`.
+              schema:
+                type: string
+                maxLength: 255
+                pattern: ^[^\u0000-\u001F\u007F]*$
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EppCode'
+              example:
+                name: atlas-tours.ma
+                epp_code: '<new code>'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /domains/{name}/transfer-lock:
+    put:
+      operationId: setTransferLock
+      tags: [Domains]
+      summary: Lock or unlock transfers
+      description: |
+        Turns the registry transfer lock (`clientTransferProhibited`) on or
+        off. Golzak locks every name after registration and after a transfer
+        in. Unlock it only when the holder is moving the name to another
+        registrar, together with `GET /domains/{name}/epp-code`; lock it
+        again if the move is abandoned. Synchronous. A name under ANRT
+        examination or expired cannot be changed (`domain_status_prohibits`).
+      parameters:
+        - $ref: '#/components/parameters/DomainNamePath'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferLockRequest'
+            example:
+              locked: false
+      responses:
+        '200':
+          description: Lock state changed.
+          headers:
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /domains/{name}/auto-renew:
+    put:
+      operationId: setAutoRenew
+      tags: [Domains]
+      summary: Turn automatic renewal on or off
+      description: |
+        Domains registered or transferred through the API start with
+        `auto_renew: false`: nothing is ever charged without a call from you.
+        With `auto_renew: true`, Golzak renews the name for one year shortly
+        before `expires_at`, at your renew price, paid from your credit. That
+        renewal counts against your account's daily cap for automatic renewals
+        (not a key's cap), appears as an operation with `initiator: auto_renew`,
+        and is reported by webhook. If credit or cap do not allow it, the
+        operation ends `failed` and you are told by webhook; renew by hand
+        before `expires_at`.
+      parameters:
+        - $ref: '#/components/parameters/DomainNamePath'
+        - $ref: '#/components/parameters/IdempotencyKeyOptional'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AutoRenewRequest'
+            example:
+              enabled: true
+      responses:
+        '200':
+          description: Setting changed.
+          headers:
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /transfers:
+    post:
+      operationId: transferDomain
+      tags: [Transfers]
+      summary: Transfer a domain in (asynchronous)
+      description: |
+        Transfers `name` from another registrar to Golzak with the EPP code
+        the holder got from the current registrar. Your transfer price is read
+        live from your client group, like every other price (`GET /prices`).
+        Credit and daily cap are checked first. Returns an operation that
+        ends `active` (the name is in your account) or `failed` (charge
+        returned to your credit).
+
+        Timing (ANRT decision 02/2024 art. 35): the current registrar has two
+        business days to accept or oppose; without an answer the transfer
+        completes automatically. If ANRT has to decide an opposition it takes
+        up to three more business days. Before ordering, make sure the name
+        is unlocked at the current registrar. If the transfer has not
+        completed 10 business days after the request, the operation ends
+        `failed` with `transfer_not_completed` and the charge is returned.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/DryRun'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferRequest'
+            example:
+              name: atlas-tours.ma
+              epp_code: '<code from the current registrar>'
+      responses:
+        '200':
+          description: Dry run only. Every check passed; nothing was ordered.
+          headers:
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DryRunResult'
+        '202':
+          description: Accepted. Follow the operation.
+          headers:
+            Location:
+              description: URL of the operation.
+              schema:
+                type: string
+                maxLength: 255
+                pattern: ^[^\u0000-\u001F\u007F]*$
+            Idempotent-Replayed:
+              $ref: '#/components/headers/Idempotent-Replayed'
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/InsufficientCredit'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '428':
+          $ref: '#/components/responses/IdempotencyKeyRequired'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/OrdersDisabled'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /balance:
+    get:
+      operationId: getBalance
+      tags: [Account]
+      summary: Read your credit and daily cap
+      description: |
+        Your prepaid credit (read live from Golzak's billing system) and, for
+        the key making the call, its daily spending cap and what it has spent
+        since 00:00 UTC.
+      responses:
+        '200':
+          description: Credit balance and today's spending against the cap of this key.
+          headers:
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Balance'
+              example:
+                credit:
+                  amount: '<your balance>'
+                  currency: '<your account currency>'
+                daily_spend_cap:
+                  amount: '<cap set for this key>'
+                  currency: '<your account currency>'
+                spent_today:
+                  amount: '<spent since 00:00 UTC>'
+                  currency: '<your account currency>'
+                cap_resets_at: '2026-10-09T00:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /operations/{id}:
+    get:
+      operationId: getOperation
+      tags: [Operations]
+      description: |
+        The current state of an operation returned by a POST, or created by an
+        automatic renewal. Poll it when you missed a webhook; once a minute at
+        most, once an hour during `registry_review`.
+      summary: Read an operation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Operation ID returned by a POST.
+          schema:
+            type: string
+            pattern: '^op_[0-9A-Z]{26}$'
+            maxLength: 255
+      responses:
+        '200':
+          description: The operation.
+          headers:
+            Request-Id:
+              $ref: '#/components/headers/Request-Id'
+            RateLimit-Limit:
+              $ref: '#/components/headers/RateLimit-Limit'
+            RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimit-Remaining'
+            RateLimit-Reset:
+              $ref: '#/components/headers/RateLimit-Reset'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+              examples:
+                registryReview:
+                  summary: Held for ANRT examination
+                  value:
+                    id: op_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+                    type: register
+                    initiator: api
+                    status: pending
+                    pending_reason: registry_review
+                    domain: atlas-tours.ma
+                    years: 1
+                    charge:
+                      amount: '<your price, read live>'
+                      currency: '<your account currency>'
+                    refund: null
+                    documents_required: true
+                    documents_deadline: null
+                    error: null
+                    created_at: '2026-10-08T09:00:00Z'
+                    updated_at: '2026-10-08T09:01:10Z'
+                    completed_at: null
+                refused:
+                  summary: Refused by ANRT
+                  value:
+                    id: op_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+                    type: register
+                    initiator: api
+                    status: refused
+                    pending_reason: null
+                    domain: atlas-tours.ma
+                    years: 1
+                    charge:
+                      amount: '<your price, read live>'
+                      currency: '<your account currency>'
+                    refund:
+                      status: credited
+                      amount: '<the charge>'
+                      currency: '<your account currency>'
+                    documents_required: false
+                    documents_deadline: null
+                    error:
+                      type: https://developers.golzak.com/domains/v1/errors#registry_refused
+                      title: Registration refused by the registry
+                      status: 422
+                      code: registry_refused
+                      detail: ANRT did not approve this name; the registration was cancelled.
+                    created_at: '2026-10-08T09:00:00Z'
+                    updated_at: '2026-10-14T10:00:00Z'
+                    completed_at: '2026-10-14T10:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+webhooks:
+  operationEvent:
+    post:
+      operationId: receiveOperationEvent
+      tags: [Operations]
+      summary: Operation event (sent by Golzak to your URL)
+      description: |
+        Golzak POSTs this to every webhook endpoint of your account (set on
+        developers.golzak.com, each with its own secret) when an operation
+        changes state. Verify the signature before trusting it:
+
+        `Golzak-Signature: v1=<hex>` where `<hex>` is
+        `HMAC-SHA256(webhook_secret, "<Golzak-Webhook-Timestamp>.<raw body>")`.
+        Refuse a timestamp more than 300 seconds from your clock. Compare in
+        constant time.
+
+        Answer any `2xx` within 10 seconds. Other answers and timeouts are
+        retried with backoff for 24 hours. Deliveries can repeat or arrive out
+        of order: deduplicate on `Golzak-Webhook-Id`, and trust the
+        operation's `updated_at` (or re-read `GET /operations/{id}`).
+      security: []
+      parameters:
+        - name: Golzak-Webhook-Id
+          in: header
+          required: true
+          description: Unique per event; the same on every retry of that event.
+          schema:
+            type: string
+            maxLength: 255
+            pattern: ^[^\u0000-\u001F\u007F]*$
+        - name: Golzak-Webhook-Timestamp
+          in: header
+          required: true
+          description: Unix time (seconds) when this delivery was signed.
+          schema:
+            type: string
+            pattern: '^[0-9]{10}$'
+            maxLength: 255
+        - name: Golzak-Signature
+          in: header
+          required: true
+          description: '`v1=` followed by the lower-case hex HMAC-SHA256.'
+          schema:
+            type: string
+            pattern: '^v1=[0-9a-f]{64}$'
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookEvent'
+            example:
+              id: evt_01JA7XB2C3D4E5F6G7H8J9K0LM
+              type: operation.active
+              created_at: '2026-10-09T08:00:00Z'
+              data:
+                operation:
+                  id: op_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+                  type: register
+                  initiator: api
+                  status: active
+                  pending_reason: null
+                  domain: atlas-tours.ma
+                  years: 1
+                  charge:
+                    amount: '<your price, read live>'
+                    currency: '<your account currency>'
+                  refund: null
+                  documents_required: false
+                  documents_deadline: null
+                  error: null
+                  created_at: '2026-10-08T09:00:00Z'
+                  updated_at: '2026-10-09T08:00:00Z'
+                  completed_at: '2026-10-09T08:00:00Z'
+      responses:
+        '200':
+          description: Received. Any 2xx counts.
+        default:
+          description: Any other answer, or no answer within 10 seconds. Golzak retries for 24 hours.
+
+components:
+  securitySchemes:
+    apiKey:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <your API key>` (starts with `gzk_live_`).
+        Create keys on developers.golzak.com after signing in with your Golzak account.
+        One key belongs to one reseller account. Every key has a required IP
+        allowlist; a call from another address answers `ip_not_allowed`. Keys
+        do not expire unless created with an expiry date.
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Required on every POST. A unique value per intended action (a UUID v4
+        is ideal). Retrying with the same key and the same body returns the
+        first answer with `Idempotent-Replayed: true` and orders nothing new.
+        The same key with a different body answers `idempotency_key_reused`.
+        Keys are kept for 24 hours.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: ^[^\u0000-\u001F\u007F]*$
+      example: 0b8c7f0e-6a39-4b8f-9a0e-2f5d7c1e9a41
+    IdempotencyKeyOptional:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Optional on PUT; same rules as on POST. Recommended.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+        pattern: ^[^\u0000-\u001F\u007F]*$
+    DryRun:
+      name: dry_run
+      in: query
+      required: false
+      description: '`true` runs every check and returns the would-be charge; nothing is ordered.'
+      schema:
+        type: boolean
+        default: false
+    DomainNamePath:
+      name: name
+      in: path
+      required: true
+      description: Full domain name of one of your domains.
+      schema:
+        $ref: '#/components/schemas/DomainNameInput'
+
+  headers:
+    RateLimit-Limit:
+      description: Requests allowed per window for this key.
+      schema:
+        type: integer
+        format: int32
+        minimum: 0
+        maximum: 2147483647
+    RateLimit-Remaining:
+      description: Requests left in the current window.
+      schema:
+        type: integer
+        format: int32
+        minimum: 0
+        maximum: 2147483647
+    RateLimit-Reset:
+      description: Seconds until the window resets.
+      schema:
+        type: integer
+        format: int32
+        minimum: 0
+        maximum: 2147483647
+    Request-Id:
+      description: Identifier of this request. Quote it to Golzak support.
+      schema:
+        type: string
+        maxLength: 255
+        pattern: ^[^\u0000-\u001F\u007F]*$
+    Idempotent-Replayed:
+      description: '`true` when this answer is a replay of an earlier request with the same Idempotency-Key.'
+      schema:
+        type: string
+        enum: ['true']
+        maxLength: 255
+
+  responses:
+    BadRequest:
+      description: Malformed request (bad JSON, bad query parameter, bad domain syntax).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#invalid_domain_name
+            title: Invalid domain name
+            status: 400
+            code: invalid_domain_name
+            detail: 'Use one label plus an accepted extension, e.g. example.ma or example.co.ma.'
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+    Unauthorized:
+      description: Missing or invalid API key.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#invalid_api_key
+            title: Invalid API key
+            status: 401
+            code: invalid_api_key
+            detail: Send Authorization Bearer with an active key.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+    Forbidden:
+      description: The key is valid but this call is not allowed (IP allowlist, daily cap, revoked account).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#daily_spend_cap_reached
+            title: Daily spending cap reached
+            status: 403
+            code: daily_spend_cap_reached
+            detail: This order would take today's spending over the cap of this key. Nothing was ordered.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+    InsufficientCredit:
+      description: Your credit balance does not cover the charge. Nothing was ordered.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#insufficient_credit
+            title: Insufficient credit
+            status: 402
+            code: insufficient_credit
+            detail: Top up your Golzak account credit, then retry with a new Idempotency-Key. Nothing was ordered.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+    NotFound:
+      description: No such domain or operation in your account.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#domain_not_found
+            title: Domain not found
+            status: 404
+            code: domain_not_found
+            detail: No domain with this name in your account.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+    Conflict:
+      description: >-
+        The current state forbids this call (name taken, operation in progress, an earlier order still being checked,
+        idempotency key in use).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#domain_not_available
+            title: Domain not available
+            status: 409
+            code: domain_not_available
+            detail: atlas-tours.ma is already registered. Nothing was ordered.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+    UnprocessableTld:
+      description: The extension is not accepted by this API.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#tld_manual_only
+            title: Extension handled by hand
+            status: 422
+            code: tld_manual_only
+            detail: .gov.ma, .ac.ma and .press.ma are not available through the API. Contact Golzak to register one.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+    ValidationFailed:
+      description: The body is well-formed but breaks a rule (holder rules, years, nameservers, extension).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#validation_failed
+            title: Validation failed
+            status: 422
+            code: validation_failed
+            detail: The request breaks 1 rule. Nothing was ordered.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+            errors:
+              - field: holder.legal_id
+                code: required
+                message: A Moroccan individual needs their CIN number in holder.legal_id.
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+    IdempotencyKeyRequired:
+      description: A POST arrived without an Idempotency-Key header.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#idempotency_key_required
+            title: Idempotency key required
+            status: 428
+            code: idempotency_key_required
+            detail: Send an Idempotency-Key header (a UUID) with every POST.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+    TooManyRequests:
+      description: Rate limit of this key reached. Wait for `Retry-After` seconds.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            maximum: 2147483647
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#rate_limited
+            title: Too many requests
+            status: 429
+            code: rate_limited
+            detail: Retry after the number of seconds in Retry-After.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+    UpstreamError:
+      description: >-
+        Golzak's billing system or the registry did not answer correctly. Safe to retry with the same
+        Idempotency-Key.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#upstream_unavailable
+            title: Upstream unavailable
+            status: 502
+            code: upstream_unavailable
+            detail: Retry with the same Idempotency-Key; a retry never orders twice.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+
+    OrdersDisabled:
+      description: Orders are switched off for a while (maintenance or an incident). Nothing was ordered; retry later.
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#orders_disabled
+            title: Orders temporarily disabled
+            status: 503
+            code: orders_disabled
+            detail: Orders are temporarily disabled. Nothing was ordered; retry later with the same Idempotency-Key.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+    InternalError:
+      description: Unexpected error on Golzak's side. Retry with the same Idempotency-Key; report the request_id.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://developers.golzak.com/domains/v1/errors#internal_error
+            title: Internal error
+            status: 500
+            code: internal_error
+            detail: Retry with the same Idempotency-Key. If it persists, contact Golzak with the request_id.
+            request_id: req_01JA7X3M9Q2W8E5R6T7Y8U9I0P
+      headers:
+        RateLimit-Limit:
+          $ref: '#/components/headers/RateLimit-Limit'
+        RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimit-Remaining'
+        RateLimit-Reset:
+          $ref: '#/components/headers/RateLimit-Reset'
+
+  schemas:
+    DomainNameInput:
+      type: string
+      description: |
+        A lower-case ASCII host name (letters, digits, hyphens, dots). The API
+        then checks the extension and answers `422 tld_manual_only` or
+        `422 tld_not_supported` when it is not accepted, and
+        `400 invalid_domain_name` when it is not exactly one label plus an
+        accepted extension (e.g. `a.b.ma`, or a bare `co.ma`, `net.ma`,
+        `org.ma`, `gov.ma`, `ac.ma`, `press.ma`, refused as names by Golzak
+        policy).
+      minLength: 4
+      maxLength: 253
+      pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+      examples: [atlas-tours.ma, atlas-export.co.ma]
+
+    DomainName:
+      type: string
+      description: |
+        A domain of your account: one label plus an accepted extension, lower
+        case ASCII (letters, digits, hyphen; label of 1 to 63 characters). In
+        v1 the extension is always `.ma`, `.co.ma`, `.net.ma` or `.org.ma`;
+        later versions may add extensions.
+      minLength: 4
+      maxLength: 253
+      pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
+      examples: [atlas-tours.ma, atlas-export.co.ma]
+
+    Extension:
+      type: string
+      description: 'One of `.ma`, `.co.ma`, `.net.ma`, `.org.ma` in v1.0.0.'
+      examples: [.ma, .co.ma, .net.ma, .org.ma]
+      maxLength: 255
+      pattern: ^[^\u0000-\u001F\u007F]*$
+
+    Hostname:
+      type: string
+      description: A nameserver host name.
+      minLength: 3
+      maxLength: 253
+      pattern: '^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$'
+
+    Nameservers:
+      type: array
+      description: 2 to 5 distinct nameserver host names (Golzak API rule).
+      minItems: 2
+      maxItems: 5
+      uniqueItems: true
+      items:
+        $ref: '#/components/schemas/Hostname'
+
+    Money:
+      type: object
+      description: |
+        An amount in your account currency. `amount` is a decimal number written
+        as a string (e.g. two decimals), never a float. Amounts are read live
+        from Golzak's billing system; the examples in these docs are
+        placeholders, not prices.
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        currency:
+          type: string
+          description: ISO 4217 code of your account currency.
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+
+    PriceTable:
+      type: object
+      description: Price per number of years; the keys are the year counts you can order.
+      propertyNames:
+        pattern: '^([1-9]|10)$'
+      additionalProperties:
+        type: string
+        maxLength: 255
+        pattern: ^[^\u0000-\u001F\u007F]*$
+
+    PriceList:
+      type: object
+      required: [currency, source, read_at, extensions]
+      properties:
+        currency:
+          type: string
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        source:
+          type: string
+          enum: [client_group]
+          description: Prices come from your client group at Golzak.
+          maxLength: 255
+        read_at:
+          type: string
+          format: date-time
+          maxLength: 255
+        extensions:
+          type: array
+          items:
+            type: object
+            required: [extension, register, renew, transfer, grace_period_days, redemption_period_days]
+            properties:
+              extension:
+                $ref: '#/components/schemas/Extension'
+              grace_period_days:
+                type: integer
+                minimum: 0
+                description: Days after `expires_at` during which you can still renew through the API. Read live.
+                format: int32
+                maximum: 2147483647
+              redemption_period_days:
+                type: integer
+                minimum: 0
+                description: Days after the grace period during which only Golzak can restore the name. Read live.
+                format: int32
+                maximum: 2147483647
+              register:
+                $ref: '#/components/schemas/PriceTable'
+              renew:
+                $ref: '#/components/schemas/PriceTable'
+              transfer:
+                $ref: '#/components/schemas/PriceTable'
+          maxItems: 100
+
+    CheckResult:
+      type: object
+      required: [name, extension, available, price]
+      properties:
+        name:
+          $ref: '#/components/schemas/DomainName'
+        extension:
+          $ref: '#/components/schemas/Extension'
+        available:
+          type: boolean
+          description: WHOIS says the name is free. The registry gives the final answer at registration.
+        price:
+          type: object
+          description: Your price for registering this name for one year.
+          required: [operation, years, amount, currency]
+          properties:
+            operation:
+              type: string
+              enum: [register]
+              maxLength: 255
+            years:
+              type: integer
+              enum: [1]
+              format: int32
+              minimum: 0
+              maximum: 2147483647
+            amount:
+              type: string
+              maxLength: 255
+              pattern: ^[^\u0000-\u001F\u007F]*$
+            currency:
+              type: string
+              maxLength: 255
+              pattern: ^[^\u0000-\u001F\u007F]*$
+
+    Holder:
+      type: object
+      description: |
+        The domain holder (registrant): **your client**, never your own company
+        and never a registrar's staff. The API refuses a holder whose e-mail or
+        organization is your own account's (`holder_is_reseller`).
+
+        `legal_id` is always required. What it must contain depends on
+        `type` and `moroccan`:
+
+        | type | moroccan | legal_id |
+        |---|---|---|
+        | individual | true | CIN (Moroccan national identity card number) |
+        | individual | false | passport number |
+        | company | true | company tax ID (ICE / RC) |
+        | company | false | company registration number or tax ID |
+
+        `moroccan` selects which document the holder must give; it is not
+        derived from the address (a Moroccan can live abroad). The API does not
+        check the number's format: ANRT checks the documents.
+      required: [type, moroccan, legal_id, first_name, last_name, email, phone, address]
+      properties:
+        type:
+          type: string
+          enum: [individual, company]
+          maxLength: 255
+        moroccan:
+          type: boolean
+          description: Holder is Moroccan (individual of Moroccan nationality, or company registered in Morocco).
+        legal_id:
+          type: string
+          minLength: 1
+          description: >-
+            CIN, passport number, ICE / RC, or registration number / tax ID, as the table above says. Leading
+            and trailing spaces are removed.
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        organization:
+          type: string
+          minLength: 1
+          description: Company name. Required when `type` is `company`.
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        first_name:
+          type: string
+          minLength: 1
+          description: Holder's first name; for a company, the contact person's.
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        last_name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        phone:
+          type: string
+          description: '`+<country code>.<number>`, e.g. `+212.612345678` (RFC 5733 format).'
+          pattern: '^\+[0-9]{1,3}\.[0-9]{1,14}$'
+          maxLength: 255
+        address:
+          $ref: '#/components/schemas/Address'
+      if:
+        properties:
+          type:
+            const: company
+      then:
+        required: [organization]
+        properties:
+          organization:
+            type: string
+            minLength: 1
+            maxLength: 255
+            pattern: ^[^\u0000-\u001F\u007F]*$
+
+    Address:
+      type: object
+      required: [line1, city, country]
+      properties:
+        line1:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        line2:
+          type: string
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        city:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        state:
+          type: string
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        postal_code:
+          type: string
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        country:
+          type: string
+          description: ISO 3166-1 alpha-2 code, upper case (e.g. `MA`, `TR`).
+          pattern: '^[A-Z]{2}$'
+          maxLength: 255
+
+    RegisterRequest:
+      type: object
+      required: [name, years, holder, nameservers]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: '#/components/schemas/DomainNameInput'
+        years:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: >-
+            Must be one of the year counts in your `register` price table (`GET /prices`). A name can never be
+            valid for more than 5 years from today (ANRT decision 02/2024 art. 33.1): a renewal that would
+            pass that limit answers `validation_failed` with `exceeds_max_validity`.
+          format: int32
+        holder:
+          $ref: '#/components/schemas/Holder'
+        nameservers:
+          $ref: '#/components/schemas/Nameservers'
+
+    RenewRequest:
+      type: object
+      required: [years]
+      additionalProperties: false
+      properties:
+        years:
+          type: integer
+          minimum: 1
+          maximum: 5
+          description: >-
+            Must be one of the year counts in your `renew` price table. A name can never be valid for more
+            than 5 years from today (ANRT decision 02/2024 art. 33.1): a renewal that would pass that limit
+            answers `validation_failed` with `exceeds_max_validity`.
+          format: int32
+
+    TransferRequest:
+      type: object
+      required: [name, epp_code]
+      additionalProperties: false
+      properties:
+        name:
+          $ref: '#/components/schemas/DomainNameInput'
+        epp_code:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Transfer code (EPP auth code) from the current registrar.
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        nameservers:
+          $ref: '#/components/schemas/Nameservers'
+
+    TransferLockRequest:
+      type: object
+      required: [locked]
+      additionalProperties: false
+      properties:
+        locked:
+          type: boolean
+          description: '`true` locks the name against transfer; `false` allows a transfer out.'
+
+    AutoRenewRequest:
+      type: object
+      required: [enabled]
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+
+    NameserversRequest:
+      type: object
+      required: [nameservers]
+      additionalProperties: false
+      properties:
+        nameservers:
+          $ref: '#/components/schemas/Nameservers'
+
+    DomainStatus:
+      type: string
+      description: |
+        - `pending_registration`: ordered, not yet live (includes ANRT examination);
+        - `pending_transfer`: transfer in progress;
+        - `active`: registered and manageable;
+        - `grace_period`: expired; still renewable through the API until the
+          grace period ends (its length per extension: `GET /prices`);
+        - `redemption_period`: past the grace period, deletion under way; not
+          renewable through the API, contact Golzak to restore it;
+        - `expired`: deleted or about to be; no longer manageable;
+        - `cancelled`: registration refused or the name was deleted;
+        - `transferred_away`: moved to another registrar.
+
+        v1 may add statuses: treat an unknown one as "not active".
+      examples: [pending_registration, active, expired]
+      maxLength: 255
+      pattern: ^[^\u0000-\u001F\u007F]*$
+
+    Domain:
+      type: object
+      required: [name, status, registered_at, expires_at, auto_renew, pending_operation_id]
+      properties:
+        name:
+          $ref: '#/components/schemas/DomainName'
+        status:
+          $ref: '#/components/schemas/DomainStatus'
+        registered_at:
+          type: [string, 'null']
+          format: date
+          maxLength: 255
+        expires_at:
+          type: [string, 'null']
+          format: date
+          maxLength: 255
+        auto_renew:
+          type: boolean
+          description: Golzak renews the name before `expires_at` from your credit (`PUT /domains/{name}/auto-renew`).
+        pending_operation_id:
+          type: [string, 'null']
+          description: The operation still running on this domain, if any.
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+
+    DomainDetail:
+      allOf:
+        - $ref: '#/components/schemas/Domain'
+        - type: object
+          required: [transfer_locked, nameservers]
+          properties:
+            transfer_locked:
+              type: boolean
+              description: The registry refuses a transfer to another registrar while `true`. Only on a single domain.
+            nameservers:
+              type: array
+              items:
+                $ref: '#/components/schemas/Hostname'
+              maxItems: 13
+
+    DomainPage:
+      type: object
+      required: [data, next_cursor]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Domain'
+          maxItems: 100
+        next_cursor:
+          type: [string, 'null']
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+
+    EppCode:
+      type: object
+      required: [name, epp_code]
+      properties:
+        name:
+          $ref: '#/components/schemas/DomainName'
+        epp_code:
+          type: string
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+
+    Balance:
+      type: object
+      required: [credit, daily_spend_cap, spent_today, cap_resets_at]
+      properties:
+        credit:
+          $ref: '#/components/schemas/Money'
+        daily_spend_cap:
+          description: Spending cap of this API key per UTC day; `null` when none is set.
+          oneOf:
+            - $ref: '#/components/schemas/Money'
+            - type: 'null'
+        spent_today:
+          $ref: '#/components/schemas/Money'
+        cap_resets_at:
+          type: string
+          format: date-time
+          maxLength: 255
+
+    DryRunResult:
+      type: object
+      required: [dry_run, would_charge, credit_after]
+      properties:
+        dry_run:
+          type: boolean
+          const: true
+        would_charge:
+          description: |
+            Your price for the order, before any tax. When Golzak's billing system adds tax for your account
+            (e.g. Moroccan VAT), the operation's `charge` is the invoice total, tax included, and the credit
+            check uses that total.
+          $ref: '#/components/schemas/Money'
+        credit_after:
+          description: Your credit after `would_charge`, counting other orders still being placed.
+          $ref: '#/components/schemas/Money'
+
+    Refund:
+      type: object
+      required: [status, amount, currency]
+      properties:
+        status:
+          type: string
+          examples: [credited, manual_review]
+          description: '`credited`: the charge is back on your credit. `manual_review`: Golzak returns it by hand.'
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        amount:
+          type: string
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        currency:
+          type: string
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+
+    Operation:
+      type: object
+      required:
+        - id
+        - type
+        - initiator
+        - status
+        - pending_reason
+        - domain
+        - years
+        - charge
+        - refund
+        - documents_required
+        - documents_deadline
+        - error
+        - created_at
+        - updated_at
+        - completed_at
+      properties:
+        id:
+          type: string
+          pattern: '^op_[0-9A-Z]{26}$'
+          maxLength: 255
+        type:
+          type: string
+          description: '`register`, `renew` or `transfer`. v1 may add types.'
+          examples: [register, renew, transfer]
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        initiator:
+          type: string
+          description: |
+            `api` (one of your calls) or `auto_renew` (an automatic renewal you
+            turned on). v1 may add values.
+          examples: [api, auto_renew]
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        status:
+          type: string
+          description: |
+            `pending` until the end, then one of:
+            `active` (done; the domain is active),
+            `refused` (registration refused by ANRT; register only),
+            `failed` (could not be done). After `refused` or `failed` the
+            charge is returned (`refund`). This set is closed for v1.
+          enum: [pending, active, refused, failed]
+          maxLength: 255
+        pending_reason:
+          description: |
+            While `pending`: `processing` (being ordered),
+            `registry_review` (ANRT examines the name; documents required),
+            `transfer_pending` (waiting for the transfer to complete).
+            `null` once finished. v1 may add reasons: treat an unknown one as
+            "still pending".
+          type: [string, 'null']
+          examples: [processing, registry_review, transfer_pending]
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        domain:
+          $ref: '#/components/schemas/DomainName'
+        years:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+        charge:
+          description: What was taken from your credit (the invoice total, tax included); `null` if nothing was.
+          oneOf:
+            - $ref: '#/components/schemas/Money'
+            - type: 'null'
+        refund:
+          oneOf:
+            - $ref: '#/components/schemas/Refund'
+            - type: 'null'
+        documents_required:
+          type: boolean
+          description: '`true` while ANRT waits for the examination form and the holder''s documents.'
+        documents_deadline:
+          type: [string, 'null']
+          format: date
+          description: Last day to send the documents to Golzak (from Golzak's e-mail).
+          maxLength: 255
+        error:
+          description: Why the operation was refused or failed.
+          oneOf:
+            - $ref: '#/components/schemas/Problem'
+            - type: 'null'
+        created_at:
+          type: string
+          format: date-time
+          maxLength: 255
+        updated_at:
+          type: string
+          format: date-time
+          maxLength: 255
+        completed_at:
+          type: [string, 'null']
+          format: date-time
+          maxLength: 255
+
+    WebhookEvent:
+      type: object
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          description: Same value as the Golzak-Webhook-Id header.
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        type:
+          type: string
+          description: |
+            - `operation.pending`: the operation entered `registry_review` (documents required);
+            - `operation.active`, `operation.refused`, `operation.failed`: final state.
+
+            v1 may add event types: acknowledge (2xx) and ignore a type you do not know.
+          examples: [operation.pending, operation.active, operation.refused, operation.failed]
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        created_at:
+          type: string
+          format: date-time
+          maxLength: 255
+        data:
+          type: object
+          required: [operation]
+          properties:
+            operation:
+              $ref: '#/components/schemas/Operation'
+
+    FieldError:
+      type: object
+      required: [field, code, message]
+      properties:
+        field:
+          type: string
+          description: JSON path of the field, e.g. `holder.legal_id`.
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        code:
+          type: string
+          description: >-
+            Stable code: `required`, `invalid_value`, `invalid_format`, `too_long`, `years_not_offered`,
+            `exceeds_max_validity`, `too_few`, `too_many`, `duplicate`. v1 may add codes.
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        message:
+          type: string
+          description: Human sentence. Do not parse it; use `code`.
+          maxLength: 2000
+          pattern: ^[^\u0000-\u001F\u007F]*$
+
+    Problem:
+      type: object
+      description: |
+        Error body (RFC 9457 problem details, media type
+        `application/problem+json`). Branch on `code`: it is stable within
+        v1. `title` and `detail` are for humans and may change.
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          description: URL of the error's documentation page.
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        title:
+          type: string
+          maxLength: 2000
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        status:
+          type: integer
+          format: int32
+          minimum: 100
+          maximum: 599
+        code:
+          type: string
+          description: |
+            Stable machine-readable code. v1 may add codes: treat an unknown
+            code by its HTTP status. Codes of v1:
+
+            - `invalid_request`
+            - `invalid_domain_name`
+            - `invalid_api_key`
+            - `ip_not_allowed`
+            - `account_suspended`
+            - `daily_spend_cap_reached`
+            - `insufficient_credit`
+            - `route_not_found`
+            - `domain_not_found`
+            - `operation_not_found`
+            - `domain_not_available`
+            - `operation_in_progress`
+            - `previous_order_unresolved`
+            - `domain_status_prohibits`
+            - `idempotency_key_in_use`
+            - `idempotency_key_reused`
+            - `idempotency_key_required`
+            - `tld_not_supported`
+            - `tld_manual_only`
+            - `validation_failed`
+            - `holder_is_reseller`
+            - `registry_refused`
+            - `transfer_not_completed`
+            - `registry_error`
+            - `rate_limited`
+            - `upstream_unavailable`
+            - `orders_disabled`
+            - `internal_error`
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        detail:
+          type: string
+          maxLength: 2000
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        request_id:
+          type: string
+          maxLength: 255
+          pattern: ^[^\u0000-\u001F\u007F]*$
+        errors:
+          type: array
+          description: Present with `validation_failed`; one entry per broken rule.
+          items:
+            $ref: '#/components/schemas/FieldError'
+          maxItems: 100

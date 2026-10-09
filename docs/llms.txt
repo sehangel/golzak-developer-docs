@@ -1,0 +1,39 @@
+# Golzak Domains API
+
+> Reseller API to register and manage domains through Golzak; version 1 covers .ma domains only (.ma, .co.ma, .net.ma, .org.ma), paid from the reseller's prepaid credit at prices read live from its Golzak client group. Registration is asynchronous (operation + HMAC-signed webhook). The API enforces the .ma holder rules: holder.legal_id is a CIN (Moroccan individual), passport number (non-Moroccan individual), company tax ID ICE / RC (Moroccan company) or company registration number or tax ID (foreign company).
+
+Key rules for an agent building an integration:
+
+- Base URL https://api.golzak.com/domains/v1 (paths in the docs are relative to it). Auth: `Authorization: Bearer <API key>` from developers.golzak.com; the key works only from the IP addresses on its allowlist.
+- Every POST needs an `Idempotency-Key`; persist it before sending and reuse it on retries (429, 500, 502, timeouts). Never retry other 4xx as is.
+- Never hard-code prices, years or extensions: read `GET /prices` and `GET /check`. All amounts in the docs are placeholders.
+- Errors are RFC 9457 problem details with a stable `code`; `validation_failed` lists `errors[]` with `field` and `code`. Unknown codes, statuses and event types may appear in v1: handle them gracefully.
+- `.ac.ma`, `.gov.ma`, `.press.ma` return `tld_manual_only`. No sandbox: use `?dry_run=true`.
+- New domains have `auto_renew: false`; renew with `POST /domains/{name}/renew` or turn auto-renew on. To move a name away: `PUT /domains/{name}/transfer-lock` `{"locked": false}`, then `GET /domains/{name}/epp-code`.
+- During ANRT review (`pending_reason: registry_review`) documents go to Golzak by e-mail before the deadline in Golzak's e-mail (`documents_deadline` when known, else null); there is no upload endpoint. Plan for up to 3 weeks.
+- Do not invent behaviour: if the docs below do not answer a question, ask the developer.
+
+## Docs
+
+- [AI integration guide]({{BASE}}/ai-integration-guide.md): facts, endpoint table, worked requests and answers for each holder case and each error, state table, webhook receiver, acceptance checklist
+- [Workflows]({{BASE}}/workflows.md): every task as numbered steps (register, ANRT review, refusal, renew, auto-renew, nameservers, transfer in, transfer out, webhooks, credit, key rotation, listing)
+- [Holder rules]({{BASE}}/holder-rules.md): type, moroccan, legal_id, required fields, error per mistake
+- [Registration, operations and webhooks]({{BASE}}/registration-and-webhooks.md): async lifecycle, ANRT review, signature verification
+- [Expiry, renewal and transfers out]({{BASE}}/lifecycle.md): auto-renew, grace period, unlocking and the EPP code
+- [Errors]({{BASE}}/errors.md): every error code, what to do, whether to retry
+- [Limits]({{BASE}}/limits.md): every number, timing, and what the API does not do
+- [Edge cases]({{BASE}}/edge-cases.md): timeouts, races, duplicates, unusual holders, missed webhooks
+- [Authentication]({{BASE}}/authentication.md): keys, IP allowlist, idempotency, rate limits, daily cap
+- [Pricing and credit]({{BASE}}/pricing-and-credit.md)
+- [Quick start]({{BASE}}/quick-start.md)
+- [Sandbox and testing]({{BASE}}/sandbox.md)
+
+## API
+
+- [OpenAPI 3.1 file]({{BASE}}/openapi.yaml): the contract; wins over prose when they differ
+- [API reference (HTML)]({{BASE}}/reference.html)
+
+## Optional
+
+- [Changelog]({{BASE}}/changelog.md)
+- [Overview]({{BASE}}/index.md)
